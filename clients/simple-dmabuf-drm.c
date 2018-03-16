@@ -72,7 +72,7 @@ struct display {
 	struct zwp_linux_dmabuf_v1 *dmabuf;
 	int xrgb8888_format_found;
 	int nv12_format_found;
-	int nv12_modifier_found;
+	uint64_t nv12_modifier;
 	int req_dmabuf_immediate;
 	int req_dmabuf_modifiers;
 };
@@ -269,19 +269,37 @@ fd_device_destroy(struct buffer *buf)
 #endif /* HAVE_LIBDRM_FREEDRENO */
 
 static void
-fill_content(struct buffer *my_buf)
+fill_content(struct buffer *my_buf, uint64_t modifier)
 {
 	int x = 0, y = 0;
 	uint32_t *pix;
+	uint8_t *pix8;
 
 	assert(my_buf->mmap);
 
-	if (my_buf->format == DRM_FORMAT_NV12) {
+	if (my_buf->format == DRM_FORMAT_NV12 &&
+	    modifier == DRM_FORMAT_MOD_SAMSUNG_64_32_TILE) {
 		pix = (uint32_t *) my_buf->mmap;
 		for (y = 0; y < my_buf->height; y++)
 			memcpy(&pix[y * my_buf->width / 4],
 			       &nv12_tiled[my_buf->width * y / 4],
 			       my_buf->width);
+	}
+	if (my_buf->format == DRM_FORMAT_NV12) {
+	    /* Fill Y part of buffer */
+	    for (y = 0; y < my_buf->height; y++) {
+		pix8 = my_buf->mmap + y * my_buf->stride;
+		for (x = 0; x < my_buf->width; x++)
+			*pix8++ = x % 0xff;
+	    }
+	    /* second plane (CbCr) is half the size of Y plane */
+	    for (y = my_buf->height * 2 / 3; y < my_buf->height; y++) {
+		pix8 = my_buf->mmap + y * my_buf->stride;
+		for (x = 0; x < my_buf->width; x+=2) {
+			*pix8++ = x % 256;
+			*pix8++ = y % 256;
+		}
+	    }
 	}
 	else {
 		for (y = 0; y < my_buf->height; y++) {
@@ -416,7 +434,6 @@ create_dmabuf_buffer(struct display *display, struct buffer *buffer,
 		/* adjust height for allocation of NV12 Y and UV planes */
 		buffer->height = height * 3 / 2;
 		buffer->bpp = 8;
-		modifier = DRM_FORMAT_MOD_SAMSUNG_64_32_TILE;
 		break;
 	default:
 		buffer->height = height;
@@ -433,7 +450,7 @@ create_dmabuf_buffer(struct display *display, struct buffer *buffer,
 		fprintf(stderr, "map_bo failed\n");
 		goto error2;
 	}
-	fill_content(buffer);
+	fill_content(buffer, modifier);
 	drm_dev->unmap_bo(buffer);
 
 	if (drm_dev->export_bo_to_prime(buffer) != 0) {
@@ -683,7 +700,7 @@ dmabuf_modifiers(void *data, struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf,
 	case DRM_FORMAT_NV12:
 		d->nv12_format_found = 1;
 		if (modifier == DRM_FORMAT_MOD_SAMSUNG_64_32_TILE)
-			d->nv12_modifier_found = 1;
+			d->nv12_modifier = DRM_FORMAT_MOD_SAMSUNG_64_32_TILE;
 		break;
 	default:
 		break;
@@ -763,7 +780,7 @@ create_display(int is_immediate, int format)
 	display = malloc(sizeof *display);
 	if (display == NULL) {
 		fprintf(stderr, "out of memory\n");
-		exit(1);
+		return NULL;
 	}
 	display->display = wl_display_connect(NULL);
 	assert(display->display);
@@ -786,18 +803,20 @@ create_display(int is_immediate, int format)
 	wl_display_roundtrip(display->display);
 	if (display->dmabuf == NULL) {
 		fprintf(stderr, "No zwp_linux_dmabuf global\n");
-		exit(1);
+		return NULL;
 	}
 
 	wl_display_roundtrip(display->display);
 
-	if ((format == DRM_FORMAT_XRGB8888 && !display->xrgb8888_format_found) ||
-		(format == DRM_FORMAT_NV12 && (!display->nv12_format_found ||
-			!display->nv12_modifier_found))) {
-		fprintf(stderr, "requested format is not available\n");
-		exit(1);
+	if (format == DRM_FORMAT_XRGB8888 && !display->xrgb8888_format_found) {
+		fprintf(stderr, "requested format XRGB8888 is not available\n");
+		return NULL;
 	}
 
+	if (format == DRM_FORMAT_NV12 && !display->nv12_format_found) {
+		fprintf(stderr, "requested format is not available\n");
+		return NULL;
+	}
 	return display;
 }
 
@@ -904,6 +923,8 @@ main(int argc, char **argv)
 	}
 
 	display = create_display(is_immediate, import_format);
+	if (!display)
+		return 1;
 	window = create_window(display, 256, 256, import_format, opts);
 	if (!window)
 		return 1;
