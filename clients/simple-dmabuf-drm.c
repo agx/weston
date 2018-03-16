@@ -57,7 +57,6 @@
 #include "fullscreen-shell-unstable-v1-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
 
-extern const unsigned nv12_tiled[];
 struct buffer;
 
 /* Possible options that affect the displayed image */
